@@ -1,58 +1,112 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 
 const INITIAL_POOL_VSOL = 30.0;
 const INITIAL_POOL_VTOKENS = 1_073_000_000.0;
+const TOTAL_SUPPLY = 1_000_000_000;
 
 const PumpFun: React.FC = () => {
-  const [initialSolBuy, setInitialSolBuy] = useState<string>("");
-  const [tokensToBuy, setTokensToBuy] = useState<string>("");
-  const [solCost, setSolCost] = useState<number | null>(null);
-  const [updatedPool, setUpdatedPool] = useState<{
+  const [mode, setMode] = useState<"solToTokens" | "tokensToSol">(
+    "solToTokens"
+  );
+  const [existingSolInCurve, setExistingSolInCurve] = useState<string>("");
+  const [solInput, setSolInput] = useState<string>("");
+  const [tokenInput, setTokenInput] = useState<string>("");
+  const [result, setResult] = useState<number | null>(null);
+  const [poolState, setPoolState] = useState<{
     vsol: number;
     vtokens: number;
   } | null>(null);
 
-  const calculateTokensForSol = (solAmount: number): number => {
+  const [solPrice, setSolPrice] = useState<number | null>(null);
+  const [solPriceError, setSolPriceError] = useState(false);
+
+  useEffect(() => {
+    const fetchSolPrice = async () => {
+      try {
+        const res = await fetch(
+          "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd"
+        );
+        if (!res.ok) throw new Error("Failed to fetch");
+        const data = await res.json();
+        setSolPrice(data.solana.usd);
+        setSolPriceError(false);
+      } catch {
+        setSolPriceError(true);
+      }
+    };
+
+    fetchSolPrice();
+    const interval = setInterval(fetchSolPrice, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const getPoolAfterExistingSol = (existingSol: number) => {
     const k = INITIAL_POOL_VSOL * INITIAL_POOL_VTOKENS;
-    const newSolReserve = INITIAL_POOL_VSOL + solAmount;
+    const newSolReserve = INITIAL_POOL_VSOL + existingSol;
     const newTokenReserve = k / newSolReserve;
-    return INITIAL_POOL_VTOKENS - newTokenReserve;
+    return { vsol: newSolReserve, vtokens: newTokenReserve };
   };
 
-  const calculateSolCost = (
-    vsol_in_bc: number,
-    vtokens_in_bc: number,
+  const calculateTokensForSol = (
+    vsol: number,
+    vtokens: number,
+    solAmount: number
+  ): number => {
+    const k = vsol * vtokens;
+    const newSolReserve = vsol + solAmount;
+    const newTokenReserve = k / newSolReserve;
+    return vtokens - newTokenReserve;
+  };
+
+  const calculateSolForTokens = (
+    vsol: number,
+    vtokens: number,
     tokenAmount: number
   ): number => {
-    const k = vsol_in_bc * vtokens_in_bc;
-    const newTokenReserve = vtokens_in_bc - tokenAmount;
+    const k = vsol * vtokens;
+    const newTokenReserve = vtokens - tokenAmount;
     const newSolReserve = k / newTokenReserve;
-    return newSolReserve - vsol_in_bc;
+    return newSolReserve - vsol;
   };
 
-  const handleCalculate = () => {
-    const solBuy = parseFloat(initialSolBuy);
-    const tokensBuy = parseFloat(tokensToBuy);
+  const marketCap = (() => {
+    const existing = parseFloat(existingSolInCurve);
+    if (isNaN(existing) || existing < 0) return null;
+    const { vsol, vtokens } = getPoolAfterExistingSol(existing);
+    const pricePerToken = vsol / vtokens;
+    const mcSol = pricePerToken * TOTAL_SUPPLY;
+    const mcUsd = solPrice != null ? mcSol * solPrice : null;
+    return { sol: mcSol, usd: mcUsd };
+  })();
 
-    if (isNaN(solBuy) || solBuy <= 0 || isNaN(tokensBuy) || tokensBuy <= 0) {
-      setSolCost(null);
+  const handleCalculate = () => {
+    const existingSol = parseFloat(existingSolInCurve);
+    if (isNaN(existingSol) || existingSol < 0) {
+      setResult(null);
       return;
     }
 
-    const tokensSold = calculateTokensForSol(solBuy);
-    console.log(tokensSold);
+    const { vsol, vtokens } = getPoolAfterExistingSol(existingSol);
+    setPoolState({ vsol, vtokens });
 
-    const vsol_in_bc = INITIAL_POOL_VSOL + solBuy;
-    const vtokens_in_bc = INITIAL_POOL_VTOKENS - tokensSold;
-
-    setUpdatedPool({ vsol: vsol_in_bc, vtokens: vtokens_in_bc });
-
-    const solCostForTokens = calculateSolCost(
-      vsol_in_bc,
-      vtokens_in_bc,
-      tokensBuy
-    );
-    setSolCost(solCostForTokens);
+    if (mode === "solToTokens") {
+      const solAmount = parseFloat(solInput);
+      if (isNaN(solAmount) || solAmount <= 0) {
+        setResult(null);
+        return;
+      }
+      const tokens = calculateTokensForSol(vsol, vtokens, solAmount);
+      setResult(tokens);
+    } else {
+      const cleanedInput = tokenInput.replace(/,/g, "");
+      const tokensAmount = parseFloat(cleanedInput);
+      if (isNaN(tokensAmount) || tokensAmount <= 0) {
+        setResult(null);
+        return;
+      }
+      const solCost = calculateSolForTokens(vsol, vtokens, tokensAmount);
+      setResult(solCost);
+    }
   };
 
   return (
@@ -62,57 +116,154 @@ const PumpFun: React.FC = () => {
           PumpFun Bonding Curve Calculator
         </h1>
 
+        {/* SOL Price indicator */}
+        <div className="mb-6 text-center text-sm text-gray-400">
+          {solPriceError ? (
+            <span className="text-red-400">Failed to fetch SOL price</span>
+          ) : solPrice != null ? (
+            <span>
+              SOL price:{" "}
+              <span className="text-white font-semibold">
+                ${solPrice.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </span>
+            </span>
+          ) : (
+            <span className="text-gray-500">Fetching SOL price...</span>
+          )}
+        </div>
+
+        <div className="flex justify-center mb-6">
+          <button
+            className={`px-4 py-2 rounded-l-md font-semibold ${
+              mode === "solToTokens"
+                ? "bg-blue-600"
+                : "bg-gray-700 hover:bg-gray-600"
+            }`}
+            onClick={() => setMode("solToTokens")}
+          >
+            SOL → Tokens
+          </button>
+          <button
+            className={`px-4 py-2 rounded-r-md font-semibold ${
+              mode === "tokensToSol"
+                ? "bg-blue-600"
+                : "bg-gray-700 hover:bg-gray-600"
+            }`}
+            onClick={() => setMode("tokensToSol")}
+          >
+            Tokens → SOL
+          </button>
+        </div>
+
         <label className="block mb-2 text-sm text-gray-400">
-          Initial SOL Buy Amount:
+          Existing SOL Already in Bonding Curve:
         </label>
         <input
           type="number"
           step="any"
-          className="w-full p-2 rounded-md text-white"
-          placeholder="e.g. 1.5"
-          value={initialSolBuy}
-          onChange={(e) => setInitialSolBuy(e.target.value)}
+          className="w-full p-2 rounded-md text-white bg-gray-700 mb-4"
+          placeholder="e.g. 5"
+          value={existingSolInCurve}
+          onChange={(e) => setExistingSolInCurve(e.target.value)}
         />
 
-        <label className="block mt-4 mb-2 text-sm text-gray-400">
-          Tokens to Buy After That:
-        </label>
-        <input
-          type="number"
-          step="any"
-          className="w-full p-2 rounded-md text-white"
-          placeholder="e.g. 10000"
-          value={tokensToBuy}
-          onChange={(e) => setTokensToBuy(e.target.value)}
-        />
+        {/* Market Cap display */}
+        {marketCap && (
+          <div className="mb-6 bg-gray-700 rounded-xl p-4">
+            <p className="text-sm text-gray-400 mb-3 font-semibold uppercase tracking-wide">
+              Market Cap at {existingSolInCurve} SOL in curve
+            </p>
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-gray-300 text-sm">SOL Market Cap</span>
+              <span className="text-purple-400 font-bold text-lg">
+                {marketCap.sol.toFixed(2)} SOL
+              </span>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-gray-300 text-sm">USD Market Cap</span>
+              {marketCap.usd != null ? (
+                <span className="text-green-400 font-bold text-lg">
+                  ${marketCap.usd.toLocaleString("en-US", {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 0,
+                  })}
+                </span>
+              ) : (
+                <span className="text-gray-500 text-sm">
+                  {solPriceError ? "Price unavailable" : "Loading..."}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {mode === "solToTokens" ? (
+          <>
+            <label className="block mb-2 text-sm text-gray-400">
+              SOL Amount to Spend:
+            </label>
+            <input
+              type="number"
+              step="any"
+              className="w-full p-2 rounded-md text-white bg-gray-700"
+              placeholder="e.g. 1.5"
+              value={solInput}
+              onChange={(e) => setSolInput(e.target.value)}
+            />
+          </>
+        ) : (
+          <>
+            <label className="block mb-2 text-sm text-gray-400">
+              Tokens Amount to Buy:
+            </label>
+            <input
+              type="text"
+              step="any"
+              className="w-full p-2 rounded-md text-white bg-gray-700"
+              placeholder="e.g. 10000"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+            />
+          </>
+        )}
 
         <button
           onClick={handleCalculate}
           className="mt-6 w-full bg-blue-600 hover:bg-blue-700 transition-all rounded-md py-2 font-semibold"
         >
-          Calculate SOL Cost
+          {mode === "solToTokens" ? "Calculate Tokens" : "Calculate SOL Cost"}
         </button>
 
-        {updatedPool && (
+        {poolState && (
           <div className="mt-6 text-center text-gray-400">
             <p>
-              Updated Pool → VSOL:{" "}
+              Current Pool → VSOL:{" "}
               <span className="text-white font-semibold">
-                {updatedPool.vsol.toFixed(6)}
+                {poolState.vsol.toFixed(6)}
               </span>
               , VTOKENS:{" "}
               <span className="text-white font-semibold">
-                {updatedPool.vtokens.toFixed(0)}
+                {poolState.vtokens.toFixed(0)}
               </span>
             </p>
           </div>
         )}
 
-        {solCost !== null && (
+        {result !== null && (
           <div className="mt-6 text-center">
-            <p className="text-lg font-semibold">SOL Cost for Next Purchase:</p>
-            <p className="text-3xl font-bold text-green-400">
-              {solCost.toFixed(6)} SOL
+            <p className="text-lg font-semibold">
+              {mode === "solToTokens"
+                ? "You will receive approximately:"
+                : "This will cost approximately:"}
+            </p>
+            <p
+              className={`text-3xl font-bold ${
+                mode === "solToTokens" ? "text-green-400" : "text-yellow-400"
+              }`}
+            >
+              {mode === "solToTokens"
+                ? `${Math.floor(result).toLocaleString()} Tokens`
+                : `${result.toFixed(6)} SOL`}
             </p>
           </div>
         )}
